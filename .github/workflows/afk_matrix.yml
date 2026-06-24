@@ -59,11 +59,10 @@ jobs:
 
       - name: Run Matrix AFK
         env:
-          # 根据矩阵索引，动态提取对应的 Secret 账号！
           FREEZEHOST_DISCORD_TOKEN: ${{ secrets[format('FREEZEHOST_DISCORD_TOKEN_{0}', matrix.account)] }}
           TG_BOT_TOKEN:             ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID:               ${{ secrets.TG_CHAT_ID }}
           MAX_RUNTIME:              ${{ github.event.inputs.duration || '300' }}
           ACCOUNT_INDEX:            ${{ matrix.account }}
         run: |
-          python afk_earn.py
+          xvfb-run --auto-servernum --server-args="-screen 0 1280x1024x24" python afk_earn.py
