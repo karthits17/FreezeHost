@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 FreezeHost AFK & Renew - 黄金流水线 (Playwright 单核全自动驱动)
-严格遵循: 登录 -> 发现服务器 -> 续费(适配最新弹窗UI) -> AFK赚币(适配物理长按)
+严格遵循: 登录 -> 发现服务器 -> 续费(适配最新弹窗UI) -> AFK赚币(强力防卡死纠偏)
 """
 
 import os
@@ -613,13 +613,12 @@ def run_pipeline():
                 if "discord.com" in page.url: handle_oauth_page(page)
             except PlaywrightTimeout: pass
 
-            # 🚀 核心防撞车修复：死等网络彻底空闲，绝对不抢跑！
             log_info("等待浏览器回调完成...")
             try:
                 page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=45000)
                 page.wait_for_load_state("networkidle", timeout=15000) 
             except PlaywrightTimeout:
-                log_warn("回调超时！如果已在主站范围，将被放行。")
+                log_warn("回调加载超时，如果已在主站范围，则放行。")
 
             log_info("✅ 登录成功！")
 
@@ -644,8 +643,9 @@ def run_pipeline():
                 if r["detail"]: s += f" {r['detail']}"
                 lines.append(s)
             
-            msg = f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines)
-            send_tg(msg, final_img)
+            if lines:
+                msg = f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines)
+                send_tg(msg, final_img)
             log_info("续费探测结束。")
 
             # ── 3. 进入挂机战场 ──────────────────────────────────
@@ -656,7 +656,7 @@ def run_pipeline():
                 log_warn(f"跳转 /earn 遇到波动 ({e})，稍后将自动纠偏...")
 
             page.wait_for_timeout(5000)
-            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 续期完成，正式开启挂机赚币模式！")
+            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 探测完成，正式开启挂机赚币模式！")
             
             global_start = time.time()
             max_runtime_sec = MAX_RUNTIME * 60
@@ -674,18 +674,35 @@ def run_pipeline():
                             log_info("🛡️ 自动点碎 Turnstile 验证框")
                 except: pass
                 
-                # 🚀 终极防撞车：避开浏览器自身的 OAuth 自动重定向周期
+                # 🚀 终极掉线防撞车纠偏 (剥离了导致挂掉的 else 分支)
                 curr_url = page.url
-                if "submitlogin" in curr_url or "discord.com" in curr_url or "/callback" in curr_url:
-                    log_info(f"⏳ 浏览器正在执行自动跳转 (当前: {curr_url})，耐心等待...")
-                    try:
-                        page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=30000)
-                    except: pass
-                elif "/earn" not in curr_url:
-                    log_info(f"⚠️ URL 偏移 (当前: {curr_url})，尝试拉回战场...")
-                    try:
-                        page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
-                    except: pass
+                if "/earn" not in curr_url:
+                    log_info(f"⚠️ URL 发生偏移 (当前: {curr_url})")
+                    
+                    # 如果掉线跳到了 Discord，自动重新授权
+                    if "discord.com" in curr_url:
+                        log_info("检测到 Discord 授权，尝试重新走授权流程...")
+                        handle_oauth_page(page)
+                        try: page.wait_for_url(re.compile(r"/submitlogin|/callback|/dashboard|/earn"), timeout=15000)
+                        except: pass
+                        curr_url = page.url
+
+                    # 如果停在回调处理页，给它最多 25 秒的缓冲时间
+                    if "submitlogin" in curr_url or "/callback" in curr_url or "login" in curr_url:
+                        log_info("系统正在处理登录回调，耐心等待跳转...")
+                        try:
+                            page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=25000)
+                        except:
+                            log_warn("后端回调响应超时！")
+
+                    # 无论上面经历了什么，只要最终还没到 /earn，强行拉回去！
+                    curr_url = page.url
+                    if "/earn" not in curr_url:
+                        log_info("强制拉回挂机战场 /earn...")
+                        try:
+                            page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
+                        except Exception as e:
+                            log_warn(f"强制跳转 /earn 遇到波动: {e}")
                 
                 # 播报状态
                 if loop_counter % 6 == 0:
