@@ -361,16 +361,26 @@ def wait_for_site_ready(page) -> bool:
 
 def handle_oauth_page(page):
     log_info("进入 OAuth 授权页处理...")
-    page.wait_for_timeout(2000)
+    try:
+        page.wait_for_timeout(2000)
+    except: pass
+    
     for _ in range(20):
         if "discord.com" not in page.url: return
-        page.evaluate("""() => {
-            document.querySelectorAll('div').forEach(el => {
-                if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
-            });
-            scrollTo(0, document.body.scrollHeight);
-        }""")
-        page.wait_for_timeout(800)
+        try:
+            page.evaluate("""() => {
+                document.querySelectorAll('div').forEach(el => {
+                    if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+                });
+                scrollTo(0, document.body.scrollHeight);
+            }""")
+        except Exception as e:
+            if "Execution context was destroyed" in str(e) or "Target" in str(e):
+                log_info("检测到页面正在自动跳转，中断 OAuth 滚动操作...")
+                return
+        try:
+            page.wait_for_timeout(800)
+        except: pass
 
     for _ in range(10):
         if "discord.com" not in page.url: return
@@ -385,8 +395,14 @@ def handle_oauth_page(page):
                 page.wait_for_timeout(2000)
                 if "discord.com" not in page.url: return
                 break
-            except Exception: continue
-        page.wait_for_timeout(1500)
+            except Exception as e:
+                if "Execution context was destroyed" in str(e) or "Target" in str(e):
+                    log_info("检测到页面正在自动跳转，中断 OAuth 点击操作...")
+                    return
+                continue
+        try:
+            page.wait_for_timeout(1500)
+        except: pass
 
 # =========================================================================
 # 第二部分：发现服务器并续费 (包含完整新版弹窗处理)
