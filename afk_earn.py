@@ -37,7 +37,6 @@ RETRY_WAIT     = 30_000
 SCREENSHOT_DIR = Path("screenshots")
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
-# 喵酱修复：还原了纯净的 URL 字符串，去除了误复制带来的 markdown 标记
 BASE_URL   = "https://free.freezehost.pro"
 VIEWPORT_W = 1280
 VIEWPORT_H = 753
@@ -116,7 +115,6 @@ def send_tg(caption: str, image_bytes: bytes | None = None):
                 f'Content-Disposition: form-data; name="photo"; filename="s.png"\r\n'
                 f"Content-Type: image/png\r\n\r\n"
             ).encode() + image_bytes + f"\r\n--{boundary}--\r\n".encode()
-            # 喵酱修复：纯净 URL
             req = Request(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
                 data=body_parts,
@@ -124,7 +122,6 @@ def send_tg(caption: str, image_bytes: bytes | None = None):
                 method="POST",
             )
         else:
-            # 喵酱修复：纯净 URL
             req = Request(
                 f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
                 data=json.dumps({"chat_id": TG_CHAT_ID, "text": caption}).encode(),
@@ -132,7 +129,7 @@ def send_tg(caption: str, image_bytes: bytes | None = None):
                 method="POST",
             )
         with urlopen(req, timeout=30) as resp:
-            log_info("TG 推送成功" if resp.status == 200 else f"TG 推送失败: HTTP {resp.status}")
+            pass # 屏蔽成功的日志，保持终端清爽
     except Exception as e:
         log_warn(f"TG 推送异常: {e}")
 
@@ -143,9 +140,14 @@ def take_screenshot(page, name: str) -> bytes | None:
         path = SCREENSHOT_DIR / f"{name}.png"
         page.screenshot(path=str(path), full_page=False)
         return path.read_bytes()
-    except Exception as e:
-        log_warn(f"截图失败: {e}")
+    except Exception:
         return None
+
+def debug_tg(page, msg: str, filename: str):
+    log_info(f"📸 正在抓取实时截图: {msg}")
+    buf = take_screenshot(page, filename)
+    if buf:
+        send_tg(f"📸 <b>调试截图</b> | 账号 {INSTANCE_ID}\n📍 节点: {msg}", buf)
 
 def merge_screenshots(browser, buffers: list) -> bytes | None:
     if not buffers: return None
@@ -163,7 +165,7 @@ def merge_screenshots(browser, buffers: list) -> bytes | None:
         )
         pg.wait_for_timeout(500)
         return pg.screenshot(full_page=True)
-    except Exception as e:
+    except Exception:
         return None
     finally:
         pg.close()
@@ -175,7 +177,6 @@ AFK_JS_PAYLOAD = r"""
 if (window.top === window.self) {
     window.addEventListener('load', function () {
         if (!window.location.href.includes('/earn') && !window.location.href.includes('/dashboard')) return;
-        console.log('[AFKv21] 注入成功，正在接管挂机逻辑');
 
         const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 6000 };
         const workerCode = `
@@ -241,13 +242,10 @@ if (window.top === window.self) {
             var msg = document.getElementById('adblocker-message'); if(msg) msg.style.display = 'none';
         }
 
-        // 🚀 核心突破：支持普通点击与长按解锁 (1200ms)
         function tryHoldClick(el) {
             if (Date.now() - lastClickTime < CFG.CLICK_DEBOUNCE) return;
             lastClickTime = Date.now(); 
             if(el.disabled) el.disabled = false;
-            
-            console.log('[AFKv21] 执行物理长按/点击:', el.innerText);
             
             const mousedown = new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window});
             const mouseup = new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window});
@@ -256,7 +254,7 @@ if (window.top === window.self) {
             setTimeout(() => {
                 el.dispatchEvent(mouseup);
                 el.click();
-            }, 1200); // 长按超过1秒，完美突破 HOLD TO START
+            }, 1200);
         }
 
         function findStartButton() {
@@ -310,7 +308,7 @@ if (window.top === window.self) {
 """
 
 # =========================================================================
-# 第一部分：稳健登录 (源自 FreezeHost-main)
+# 第一部分：稳健登录
 # =========================================================================
 def check_site_down(page) -> bool:
     try:
@@ -412,41 +410,43 @@ def discover_server_ids(page) -> list[str]:
             if m: captured.add(m.group(1))
 
         page.on("request", on_req)
-        if attempt == 0:
-            log_info("加载 Dashboard 发现服务器...")
-            try:
-                page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=30000)
-            except Exception as e:
-                log_warn(f"跳往Dashboard受阻: {e}，尝试刷新...")
-                page.reload(wait_until="networkidle")
-        else:
-            log_info(f"第 {attempt+1} 次重试发现服务器...")
-            page.reload(wait_until="networkidle")
+        
+        # 🛡️ 喵酱装甲：全盘包裹在 try...except 内，即使跳错也绝不崩溃
+        try:
+            log_info(f"第 {attempt+1} 次尝试加载 Dashboard 发现服务器...")
+            page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded", timeout=30000)
+            page.wait_for_timeout(5000)
+            
+            js_ids = page.evaluate(r"""() => {
+                const ids = [];
+                if (typeof serverData !== 'undefined' && Array.isArray(serverData))
+                    serverData.forEach(s => { if (s.identifier) ids.push(s.identifier); });
+                if (!ids.length) document.querySelectorAll('script:not([src])').forEach(sc => {
+                    for (const m of sc.textContent.matchAll(/identifier:\s*["']([a-f0-9]{6,})["']/gi))
+                        ids.push(m[1]);
+                });
+                return ids;
+            }""")
 
-        page.wait_for_timeout(5000)
-        page.remove_listener("request", on_req)
+            all_ids = set(js_ids or []) | captured
+            
+            try: page.remove_listener("request", on_req)
+            except: pass
 
-        js_ids = page.evaluate(r"""() => {
-            const ids = [];
-            if (typeof serverData !== 'undefined' && Array.isArray(serverData))
-                serverData.forEach(s => { if (s.identifier) ids.push(s.identifier); });
-            if (!ids.length) document.querySelectorAll('script:not([src])').forEach(sc => {
-                for (const m of sc.textContent.matchAll(/identifier:\s*["']([a-f0-9]{6,})["']/gi))
-                    ids.push(m[1]);
-            });
-            return ids;
-        }""")
+            if all_ids:
+                for sid in sorted(all_ids):
+                    _server_label(sid)
+                    _register_sensitive(sid)
+                log_info(f"发现 {len(all_ids)} 台服务器")
+                return sorted(all_ids)
+            
+            log_warn(f"第 {attempt+1} 次未发现服务器")
+            
+        except Exception as e:
+            log_warn(f"发现服务器时遇到异常 (自动拦截): {e}")
+            try: page.remove_listener("request", on_req)
+            except: pass
 
-        all_ids = set(js_ids or []) | (captured if not js_ids else set())
-        for sid in sorted(all_ids):
-            _server_label(sid)
-            _register_sensitive(sid)
-
-        if all_ids:
-            log_info(f"发现 {len(all_ids)} 台服务器")
-            return sorted(all_ids)
-
-        log_warn(f"第 {attempt+1} 次未发现服务器")
         if attempt < 2:
             page.wait_for_timeout(3000)
 
@@ -459,7 +459,7 @@ def process_server(page, server_id: str) -> dict:
 
     log_info(f"[{server_id}] 开始处理续期")
     try:
-        page.goto(server_url, wait_until="networkidle")
+        page.goto(server_url, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
 
         status_text = page.evaluate("""() => {
@@ -502,12 +502,10 @@ def process_server(page, server_id: str) -> dict:
         log_info(f"[{server_id}] 探测安全验证 (Turnstile)...")
         for _ in range(15):
             try:
-                # 喵酱修复：纯净 URL
                 iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
                 if iframe:
                     cb = iframe.locator('input[type="checkbox"], .cb-lb')
-                    if cb.is_visible(timeout=1000): 
-                        cb.click()
+                    if cb.is_visible(timeout=1000): cb.click()
             except: pass
             
             body_text = page.inner_text("body")
@@ -521,7 +519,7 @@ def process_server(page, server_id: str) -> dict:
         page.wait_for_timeout(4000)
 
         log_info(f"[{server_id}] 验证流程结束，重新读取剩余天数校验结果...")
-        page.goto(server_url, wait_until="networkidle")
+        page.goto(server_url, wait_until="domcontentloaded")
         page.wait_for_timeout(3000)
         
         after_text = page.evaluate("""() => {
@@ -617,10 +615,16 @@ def run_pipeline():
 
             log_info("等待浏览器回调完成...")
             try:
-                page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=45000)
-                page.wait_for_load_state("networkidle", timeout=15000) 
+                # 喵酱改动：移除 networkidle 死等，只认目标地址
+                page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=30000)
             except PlaywrightTimeout:
-                log_warn("回调加载超时，如果已在主站范围，则放行。")
+                curr_url = page.url
+                if "submitlogin" in curr_url or "callback" in curr_url:
+                    log_warn("停留在回调页，强制跳往 Dashboard...")
+                    try: page.goto(f"{BASE_URL}/dashboard", wait_until="domcontentloaded", timeout=15000)
+                    except: pass
+                else:
+                    log_warn("回调加载超时，如果已在主站范围，则放行。")
 
             log_info("✅ 登录成功！")
 
@@ -629,6 +633,9 @@ def run_pipeline():
             results, screenshots = [], []
             if not server_ids:
                 log_info("❌ 未发现任何服务器，跳过续费步骤。")
+                # 📸 强制拍照并汇报（修复原来不拍图的 Bug）
+                buf = take_screenshot(page, "no_servers")
+                send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n❌ 未发现任何服务器！", buf)
             else:
                 for sid in server_ids:
                     log_info("=" * 50)
@@ -637,16 +644,17 @@ def run_pipeline():
                     buf = take_screenshot(page, f"server-{_SERVER_INDEX.get(sid, 0)}")
                     if buf: screenshots.append(buf)
 
-            final_img = (screenshots[0] if len(screenshots) == 1 else merge_screenshots(browser, screenshots) if screenshots else None)
-            lines = []
-            for r in results:
-                s = f"服务器: {r['server_id']} | {r['emoji']}{r['status_label']}"
-                if r["detail"]: s += f" {r['detail']}"
-                lines.append(s)
-            
-            if lines:
-                msg = f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines)
-                send_tg(msg, final_img)
+                final_img = (screenshots[0] if len(screenshots) == 1 else merge_screenshots(browser, screenshots) if screenshots else None)
+                lines = []
+                for r in results:
+                    s = f"服务器: {r['server_id']} | {r['emoji']}{r['status_label']}"
+                    if r["detail"]: s += f" {r['detail']}"
+                    lines.append(s)
+                
+                if lines:
+                    msg = f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines)
+                    send_tg(msg, final_img)
+                    
             log_info("续费探测结束。")
 
             # ── 3. 进入挂机战场 ──────────────────────────────────
@@ -657,52 +665,54 @@ def run_pipeline():
                 log_warn(f"跳转 /earn 遇到波动 ({e})，稍后将自动纠偏...")
 
             page.wait_for_timeout(5000)
-            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 探测完成，正式开启挂机赚币模式！")
             
             global_start = time.time()
             max_runtime_sec = MAX_RUNTIME * 60
             loop_counter = 0
 
-            # 挂机死循环守护
+            # 🛡️ 喵酱装甲：无尽挂机循环，内部一切异常统统吸收！
             while time.time() - global_start < max_runtime_sec:
                 loop_counter += 1
                 try:
-                    # 喵酱修复：纯净 URL
-                    iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
-                    if iframe:
-                        cb = iframe.locator('input[type="checkbox"], .cb-lb')
-                        if cb.is_visible(timeout=1000): cb.click()
-                except: pass
-                
-                curr_url = page.url
-                if "/earn" not in curr_url:
-                    log_info(f"⚠️ URL 发生偏移 (当前: {curr_url})")
+                    try:
+                        iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
+                        if iframe:
+                            cb = iframe.locator('input[type="checkbox"], .cb-lb')
+                            if cb.is_visible(timeout=1000): cb.click()
+                    except: pass
                     
-                    if "discord.com" in curr_url:
-                        log_info("检测到 Discord 授权，尝试重新走授权流程...")
-                        handle_oauth_page(page)
-                        try: page.wait_for_url(re.compile(r"/submitlogin|/callback|/dashboard|/earn"), timeout=15000)
-                        except: pass
-                        curr_url = page.url
-
-                    if "submitlogin" in curr_url or "/callback" in curr_url or "login" in curr_url:
-                        log_info("系统正在处理登录回调，耐心等待跳转...")
-                        try: page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=25000)
-                        except: log_warn("后端回调响应超时！")
-
                     curr_url = page.url
                     if "/earn" not in curr_url:
-                        log_info("强制拉回挂机战场 /earn...")
-                        try: page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
-                        except Exception as e: log_warn(f"强制跳转 /earn 遇到波动: {e}")
-                
-                if loop_counter % 6 == 0:
-                    try:
-                        ui_status = page.evaluate("() => document.getElementById('afk-status-title')?.innerText || '等待注入'")
-                        ui_timer  = page.evaluate("() => document.getElementById('afk-timer')?.innerText || '--:--'")
-                        log_info(f"📊 网页探针回传 | 状态: {ui_status} | 倒计时: {ui_timer}")
-                    except: pass
-                
+                        log_info(f"⚠️ URL 发生偏移 (当前: {curr_url})")
+                        
+                        if "discord.com" in curr_url:
+                            log_info("检测到 Discord 授权，尝试重新走授权流程...")
+                            handle_oauth_page(page)
+                            try: page.wait_for_url(re.compile(r"/submitlogin|/callback|/dashboard|/earn"), timeout=15000)
+                            except: pass
+                            curr_url = page.url
+
+                        if "submitlogin" in curr_url or "/callback" in curr_url or "login" in curr_url:
+                            log_info("系统正在处理登录回调，耐心等待跳转...")
+                            try: page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=25000)
+                            except: log_warn("后端回调响应超时！")
+
+                        curr_url = page.url
+                        if "/earn" not in curr_url:
+                            log_info("强制拉回挂机战场 /earn...")
+                            try: page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
+                            except Exception as e: log_warn(f"强制跳转 /earn 遇到波动: {e}")
+                    
+                    if loop_counter % 6 == 0:
+                        try:
+                            ui_status = page.evaluate("() => document.getElementById('afk-status-title')?.innerText || '等待注入'")
+                            ui_timer  = page.evaluate("() => document.getElementById('afk-timer')?.innerText || '--:--'")
+                            log_info(f"📊 网页探针回传 | 状态: {ui_status} | 倒计时: {ui_timer}")
+                        except: pass
+                        
+                except Exception as loop_e:
+                    log_warn(f"挂机死循环内部发生异常 (被自动拦截): {loop_e}")
+                    
                 page.wait_for_timeout(10000)
 
             log_info(f"挂机任务圆满结束。")
