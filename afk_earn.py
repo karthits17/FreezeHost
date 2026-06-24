@@ -16,11 +16,16 @@ ACCOUNT_INDEX = os.environ.get("ACCOUNT_INDEX", "1").strip()
 MAX_RUNTIME   = int(os.environ.get("MAX_RUNTIME", "300"))  
 
 BASE_URL   = "https://free.freezehost.pro"
+MAX_SITE_RETRIES = 3
+RETRY_WAIT = 30000
 
 def log_info(msg: str):
     ts = datetime.now().strftime("%H:%M:%S")
     safe_msg = msg.replace(DISCORD_TOKEN, "***") if DISCORD_TOKEN else msg
     print(f"[{ts}] [账号 {ACCOUNT_INDEX}] {safe_msg}", flush=True)
+
+def log_warn(msg: str):
+    log_info(f"⚠️ {msg}")
 
 def send_tg(text: str):
     if not TG_CHAT_ID or not TG_BOT_TOKEN: return
@@ -36,7 +41,110 @@ def send_tg(text: str):
         log_info(f"TG 推送异常: {e}")
 
 # =========================================================================
-# 🐾 全自动挂机防冻防断线 JS 引擎 (仅在 /earn 页面激活)
+# 🐾 100% 还原原版的站点检测与稳健登录逻辑
+# =========================================================================
+def check_site_down(page) -> bool:
+    try:
+        return page.evaluate("""() => {
+            const body = document.body ? document.body.innerText : '';
+            if (body.includes('CONNECTION TO THE MANAGEMENT SERVICES LOST')) return true;
+            if (body.includes('Retrying in') && body.includes('Retry Now')) return true;
+            if (document.querySelector('button:has-text("Retry Now")')) return true;
+            return false;
+        }""")
+    except Exception:
+        return False
+
+def wait_for_site_ready(page) -> bool:
+    for attempt in range(1, MAX_SITE_RETRIES + 1):
+        log_info(f"加载 FreezeHost 首页 (尝试 {attempt}/{MAX_SITE_RETRIES})...")
+        try:
+            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+        except PlaywrightTimeout:
+            log_warn(f"首页加载超时 (尝试 {attempt})")
+            if attempt < MAX_SITE_RETRIES: page.wait_for_timeout(RETRY_WAIT)
+            continue
+
+        page.wait_for_timeout(3000)
+
+        if check_site_down(page):
+            log_warn(f"FreezeHost 后端服务不可用 (尝试 {attempt})")
+            try:
+                retry_btn = page.locator('button:has-text("Retry Now")')
+                if retry_btn.is_visible():
+                    log_info("点击页面 Retry Now 按钮...")
+                    retry_btn.click()
+                    page.wait_for_timeout(10000)
+                    if not check_site_down(page):
+                        log_info("站点恢复正常")
+                        return True
+            except Exception: pass
+            if attempt < MAX_SITE_RETRIES:
+                log_info(f"等待 {RETRY_WAIT // 1000} 秒后重试...")
+                page.wait_for_timeout(RETRY_WAIT)
+            continue
+
+        try:
+            if page.locator('span.text-lg:has-text("Login with Discord")').is_visible():
+                log_info("首页加载正常，登录按钮可见")
+                return True
+        except Exception: pass
+        log_info("首页已加载（未检测到宕机页面）")
+        return True
+    return False
+
+def handle_oauth_page(page):
+    log_info("进入 OAuth 授权页处理")
+    page.wait_for_timeout(2000)
+    for _ in range(20):
+        if "discord.com" not in page.url: return
+        btn_text = ""
+        try:
+            for sel in ['button[type="submit"]', 'div[class*="footer"] button', 'button[class*="primary"]']:
+                btn = page.locator(sel).last
+                if btn.is_visible():
+                    btn_text = btn.inner_text().strip().lower()
+                    break
+        except Exception: pass
+        if "authorize" in btn_text and "scroll" not in btn_text: break
+        page.evaluate("""() => {
+            const sels = ['[class*="scroller"]','[class*="oauth2"]','[class*="permissionList"]',
+                '[class*="content"] [class*="scroll"]','[class*="listScroller"]'];
+            let scrolled = false;
+            for (const sel of sels) {
+                for (const el of document.querySelectorAll(sel)) {
+                    if (el.scrollHeight > el.clientHeight) { el.scrollTop = el.scrollHeight; scrolled = true; }
+                }
+            }
+            if (!scrolled) scrollTo(0, document.body.scrollHeight);
+        }""")
+        page.wait_for_timeout(800)
+
+    for _ in range(10):
+        if "discord.com" not in page.url: return
+        for sel in ['button:has-text("Authorize")','button:has-text("授权")', 'button[type="submit"]']:
+            try:
+                btn = page.locator(sel).last
+                if not btn.is_visible(): continue
+                text = btn.inner_text().strip()
+                if any(k in text.lower() for k in ("取消","cancel","deny")): continue
+                if "scroll" in text.lower():
+                    page.evaluate("scrollTo(0, document.body.scrollHeight);")
+                    page.wait_for_timeout(1000)
+                    break
+                if btn.is_disabled():
+                    page.wait_for_timeout(1000)
+                    break
+                btn.click()
+                page.wait_for_timeout(2000)
+                if "discord.com" not in page.url: return
+                break
+            except Exception: continue
+        page.wait_for_timeout(1500)
+
+
+# =========================================================================
+# 🐾 全自动挂机防冻防断线 JS 引擎 (适配 HOLD TO START)
 # =========================================================================
 AFK_JS_PAYLOAD = r"""
 if (window.top === window.self) {
@@ -44,7 +152,7 @@ if (window.top === window.self) {
         if (!window.location.href.includes('/earn')) return;
         console.log('[AFKv20] 注入成功，正在接管挂机逻辑');
 
-        const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 3000 };
+        const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 5000 };
         const workerCode = `
             let iv = null;
             self.onmessage = function(e) {
@@ -67,7 +175,7 @@ if (window.top === window.self) {
 
         panel.innerHTML = `
             <div id="afk-header" style="background:rgba(255,255,255,0.05);padding:10px;border-bottom:1px solid rgba(255,255,255,0.07);">
-              <span style="font-weight:bold;color:#7eb3ff;">🤖 挂机引擎 v20</span>
+              <span style="font-weight:bold;color:#7eb3ff;">🤖 挂机引擎 v21</span>
               <span id="afk-uptime" style="float:right;color:#aaa;">0分0秒</span>
             </div>
             <div style="padding:10px;">
@@ -106,13 +214,31 @@ if (window.top === window.self) {
         function bypassAdblock() {
             if(typeof adblockerDetected !== 'undefined') adblockerDetected = false;
             var msg = document.getElementById('adblocker-message'); if(msg) msg.style.display = 'none';
-            var btn = document.getElementById('start-afk-btn'); 
-            if(btn && btn.disabled) { btn.disabled = false; btn.textContent = 'Start AFK Session'; }
         }
 
-        function tryClick(el) {
+        // 🐾 修复点：模拟物理长按 (HOLD TO START)
+        function tryHoldClick(el) {
             if (Date.now() - lastClickTime < CFG.CLICK_DEBOUNCE) return;
-            lastClickTime = Date.now(); el.click();
+            lastClickTime = Date.now(); 
+            el.disabled = false;
+            
+            console.log("执行长按操作...");
+            const mousedown = new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window});
+            const mouseup = new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window});
+            
+            el.dispatchEvent(mousedown);
+            setTimeout(() => {
+                el.dispatchEvent(mouseup);
+                el.click();
+            }, 800); // 模拟按住 800 毫秒
+        }
+
+        function findStartButton() {
+            const btns = Array.from(document.querySelectorAll('button'));
+            return btns.find(b => {
+                const t = b.innerText.toUpperCase();
+                return t.includes('HOLD TO START') || t.includes('START NEW SESSION') || t.includes('START AFK');
+            });
         }
 
         function loop() {
@@ -134,16 +260,16 @@ if (window.top === window.self) {
 
             if (timerText === '0:00' || timerText === '00:00') {
                 document.getElementById('afk-status-title').textContent = '🔄 Session 续期中';
-                const renewBtn = document.evaluate("//button[contains(.,'Start New Session')]", document, null, 9, null).singleNodeValue;
-                if (renewBtn) tryClick(renewBtn);
+                const btn = findStartButton();
+                if (btn) tryHoldClick(btn);
                 else setTimeout(() => location.reload(), 2000);
                 return;
             }
             
-            const startBtn = document.getElementById('start-afk-btn');
+            const startBtn = findStartButton();
             if (startBtn && startBtn.offsetParent !== null) { 
                 document.getElementById('afk-status-title').textContent = '🚀 点击开始赚币';
-                tryClick(startBtn); 
+                tryHoldClick(startBtn); 
                 return; 
             }
             document.getElementById('afk-status-title').textContent = '⏳ 等待操作/加载';
@@ -153,76 +279,36 @@ if (window.top === window.self) {
 }
 """
 
-def handle_oauth_page(page):
-    log_info("进入 OAuth 授权页处理...")
-    page.wait_for_timeout(2000)
-    for _ in range(20):
-        if "discord.com" not in page.url: return
-        page.evaluate("""() => {
-            document.querySelectorAll('div').forEach(el => {
-                if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
-            });
-            scrollTo(0, document.body.scrollHeight);
-        }""")
-        page.wait_for_timeout(800)
-
-    for _ in range(10):
-        if "discord.com" not in page.url: return
-        for sel in ['button:has-text("Authorize")', 'button:has-text("授权")', 'button[type="submit"]']:
-            try:
-                btn = page.locator(sel).last
-                if not btn.is_visible(): continue
-                text = btn.inner_text().strip()
-                if any(k in text.lower() for k in ("取消","cancel","deny")): continue
-                if btn.is_disabled(): continue
-                btn.click()
-                page.wait_for_timeout(2000)
-                if "discord.com" not in page.url: return
-                break
-            except Exception: continue
-        page.wait_for_timeout(1500)
-
-def wait_turnstile(page, timeout=30):
-    """自动探测并点击 CF 盾牌"""
-    start_time = time.time()
-    while time.time() - start_time < timeout:
-        try:
-            iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
-            if iframe:
-                cb = iframe.locator('input[type="checkbox"], .cb-lb')
-                if cb.is_visible(timeout=1000): cb.click()
-        except: pass
-        
-        try:
-            val = page.evaluate("() => document.querySelector('[name=cf-turnstile-response]')?.value || ''")
-            if val and len(str(val)) > 20: return True
-        except: pass
-        page.wait_for_timeout(1000)
-    return False
-
-
-# =========================================================================
-# 🐾 核心大流程：登录 -> 查服务器 -> 续费 -> 挂机
-# =========================================================================
 def run_pipeline():
     if not DISCORD_TOKEN:
         log_info("跳过：未配置 FREEZEHOST_DISCORD_TOKEN")
         return
 
     with sync_playwright() as pw:
-        log_info("🚀 启动浏览器 (Headed 模式)")
+        log_info("🚀 启动浏览器 (Headed 模式 + Stealth 防检测)")
+        
         browser = pw.chromium.launch(
             headless=False,
             args=[
                 "--no-sandbox",
                 "--disable-gpu",
                 "--disable-dev-shm-usage",
-                "--autoplay-policy=no-user-gesture-required" 
+                "--autoplay-policy=no-user-gesture-required",
+                "--disable-blink-features=AutomationControlled" # 隐藏自动化特征
             ]
         )
-        page = browser.new_page(viewport={"width": 1280, "height": 753})
+        # 伪装 user_agent
+        context = browser.new_context(
+            viewport={"width": 1280, "height": 753},
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        
+        # 🐾 修复点：彻底抹除 Webdriver 指纹，防止 headless_detected 封禁！
+        context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        context.add_init_script(AFK_JS_PAYLOAD)
+        
+        page = context.new_page()
         page.set_default_timeout(60_000)
-        page.add_init_script(AFK_JS_PAYLOAD)
 
         try:
             # ── 1. 稳健登录 ──────────────────────
@@ -231,14 +317,17 @@ def run_pipeline():
             
             try:
                 page.click('span.text-lg:has-text("Login with Discord")', timeout=15000)
-                # 🛡️ 修复隐藏按钮导致超时的致命Bug：直接用JS强制点击确认按钮
                 page.evaluate("document.querySelector('button#confirm-login')?.click();")
                 log_info("已接受服务条款 (通过底层JS点击)")
             except Exception as e:
                 log_info(f"点击条款时出现波动: {e}")
 
-            page.wait_for_url(re.compile(r"discord\.com"), timeout=20000)
-            log_info("已到达 Discord, 开始注入 Token...")
+            # 🐾 修复点：加长登录跳转容忍度，防止偶尔的网络波动导致 20 秒崩溃
+            try:
+                page.wait_for_url(re.compile(r"discord\.com"), timeout=40000)
+                log_info("已到达 Discord, 开始注入 Token...")
+            except PlaywrightTimeout:
+                log_warn("Discord 跳转超时，但尝试继续执行...")
 
             page.evaluate("""(token) => {
                 const f = document.createElement('iframe'); f.style.display = 'none'; document.body.appendChild(f);
@@ -255,11 +344,18 @@ def run_pipeline():
 
             log_info("Token 注入成功，处理 OAuth 跳转...")
             try:
-                page.wait_for_url(re.compile(r"discord\.com/oauth2/authorize"), timeout=8000)
+                page.wait_for_url(re.compile(r"discord\.com/oauth2/authorize"), timeout=15000)
                 if "discord.com" in page.url: handle_oauth_page(page)
             except PlaywrightTimeout: pass
 
-            page.wait_for_url(lambda u: "/callback" in u or "/dashboard" in u or "/earn" in u, timeout=20000)
+            try:
+                page.wait_for_url(re.compile(r"/callback|/dashboard|/earn"), timeout=45000)
+            except PlaywrightTimeout:
+                if "free.freezehost.pro" in page.url:
+                    log_warn("跳回超时，但已处于主站，强制放行")
+                else:
+                    raise RuntimeError("OAuth 彻底卡死在 Discord，无法返回")
+
             if "/callback" in page.url:
                 page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=15000)
 
@@ -289,7 +385,6 @@ def run_pipeline():
                     page.goto(url, wait_until="domcontentloaded")
                     page.wait_for_timeout(5000)
                     
-                    # 使用强大的 JS 选择器点出续费按钮
                     clicked = page.evaluate("""() => {
                         const btns = Array.from(document.querySelectorAll('button'));
                         const target = btns.find(b => b.innerText.includes('Extend') || b.innerText.includes('Renew') || b.innerText.includes('연장'));
@@ -304,10 +399,17 @@ def run_pipeline():
                         continue
                         
                     log_info(f"[{server_id}] 🖱️ 已点击续期，探测 CF 盾牌...")
-                    wait_turnstile(page, timeout=20)
-                    page.wait_for_timeout(3000)
+                    # 简单过盾
+                    try:
+                        for _ in range(10):
+                            iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
+                            if iframe:
+                                cb = iframe.locator('input[type="checkbox"], .cb-lb')
+                                if cb.is_visible(timeout=1000): cb.click()
+                            page.wait_for_timeout(2000)
+                    except: pass
                     
-                    # 点击完成/关闭弹窗
+                    page.wait_for_timeout(3000)
                     page.evaluate("""() => {
                         document.querySelectorAll('button').forEach(b => {
                             if (b.innerText.includes('Next') || b.innerText.includes('닫기') || b.innerText.includes('Close') || b.innerText.includes('Confirm')) {
@@ -353,6 +455,19 @@ def run_pipeline():
                         log_info(f"📊 网页探针回传 | 状态: {ui_status} | 倒计时: {ui_timer}")
                     except: pass
                 
+                # 双重保险：如果在探针里发现还没点下去，Python 亲自下场模拟点击
+                try:
+                    page.evaluate("""() => {
+                        const startBtn = document.getElementById('start-afk-btn');
+                        if(startBtn && startBtn.innerText.includes('HOLD TO START')){
+                            const mousedown = new MouseEvent('mousedown', {bubbles: true});
+                            const mouseup = new MouseEvent('mouseup', {bubbles: true});
+                            startBtn.dispatchEvent(mousedown);
+                            setTimeout(() => { startBtn.dispatchEvent(mouseup); startBtn.click(); }, 800);
+                        }
+                    }""")
+                except: pass
+
                 page.wait_for_timeout(10000)
 
             log_info(f"挂机任务圆满结束。")
@@ -362,6 +477,7 @@ def run_pipeline():
             log_info(f"❌ 全局异常崩溃: {e}")
             traceback.print_exc()
         finally:
+            context.close()
             browser.close()
 
 if __name__ == "__main__":
