@@ -37,7 +37,8 @@ RETRY_WAIT     = 30_000
 SCREENSHOT_DIR = Path("screenshots")
 SCREENSHOT_DIR.mkdir(exist_ok=True)
 
-BASE_URL   = "[https://free.freezehost.pro](https://free.freezehost.pro)"
+# 喵酱修复：还原了纯净的 URL 字符串，去除了误复制带来的 markdown 标记
+BASE_URL   = "https://free.freezehost.pro"
 VIEWPORT_W = 1280
 VIEWPORT_H = 753
 
@@ -115,15 +116,17 @@ def send_tg(caption: str, image_bytes: bytes | None = None):
                 f'Content-Disposition: form-data; name="photo"; filename="s.png"\r\n'
                 f"Content-Type: image/png\r\n\r\n"
             ).encode() + image_bytes + f"\r\n--{boundary}--\r\n".encode()
+            # 喵酱修复：纯净 URL
             req = Request(
-                f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TG_BOT_TOKEN}/sendPhoto",
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendPhoto",
                 data=body_parts,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
                 method="POST",
             )
         else:
+            # 喵酱修复：纯净 URL
             req = Request(
-                f"[https://api.telegram.org/bot](https://api.telegram.org/bot){TG_BOT_TOKEN}/sendMessage",
+                f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage",
                 data=json.dumps({"chat_id": TG_CHAT_ID, "text": caption}).encode(),
                 headers={"Content-Type": "application/json"},
                 method="POST",
@@ -499,7 +502,8 @@ def process_server(page, server_id: str) -> dict:
         log_info(f"[{server_id}] 探测安全验证 (Turnstile)...")
         for _ in range(15):
             try:
-                iframe = page.frame_locator('iframe[src^="[https://challenges.cloudflare.com](https://challenges.cloudflare.com)"]').first
+                # 喵酱修复：纯净 URL
+                iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
                 if iframe:
                     cb = iframe.locator('input[type="checkbox"], .cb-lb')
                     if cb.is_visible(timeout=1000): 
@@ -663,7 +667,8 @@ def run_pipeline():
             while time.time() - global_start < max_runtime_sec:
                 loop_counter += 1
                 try:
-                    iframe = page.frame_locator('iframe[src^="[https://challenges.cloudflare.com](https://challenges.cloudflare.com)"]').first
+                    # 喵酱修复：纯净 URL
+                    iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
                     if iframe:
                         cb = iframe.locator('input[type="checkbox"], .cb-lb')
                         if cb.is_visible(timeout=1000): cb.click()
