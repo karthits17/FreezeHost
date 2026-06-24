@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FreezeHost AFK & Renew - 黄金流水线 (Playwright 单核全自动驱动)
-严格遵循: 登录 -> 发现服务器 -> 续费(适配最新弹窗UI) -> AFK赚币(强力防卡死纠偏)
+FreezeHost AFK & Renew - 战地记者调试版
+带全链路实时截图反馈，精准定位卡死原因
 """
 
 import os
@@ -20,7 +20,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
 # =====================================================================
-# 全局环境变量共享映射区
+# 全局环境变量
 # =====================================================================
 if "FREEZEHOST_DISCORD_TOKEN" in os.environ:
     os.environ["DISCORD_TOKEN"] = os.environ["FREEZEHOST_DISCORD_TOKEN"]
@@ -129,7 +129,7 @@ def send_tg(caption: str, image_bytes: bytes | None = None):
                 method="POST",
             )
         with urlopen(req, timeout=30) as resp:
-            log_info("TG 推送成功" if resp.status == 200 else f"TG 推送失败: HTTP {resp.status}")
+            pass # 屏蔽成功的日志，保持终端清爽
     except Exception as e:
         log_warn(f"TG 推送异常: {e}")
 
@@ -140,39 +140,23 @@ def take_screenshot(page, name: str) -> bytes | None:
         path = SCREENSHOT_DIR / f"{name}.png"
         page.screenshot(path=str(path), full_page=False)
         return path.read_bytes()
-    except Exception as e:
-        log_warn(f"截图失败: {e}")
+    except Exception:
         return None
 
-def merge_screenshots(browser, buffers: list) -> bytes | None:
-    if not buffers: return None
-    pg = browser.new_page(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
-    try:
-        imgs = "".join(
-            f'<img src="data:image/png;base64,{base64.b64encode(b).decode()}" '
-            f'style="width:100%;border-radius:8px;border:2px solid #202225;'
-            f'box-shadow:0 4px 6px rgba(0,0,0,.3);" />'
-            for b in buffers
-        )
-        pg.set_content(
-            f'<body style="margin:0;padding:15px;background:#2f3136;'
-            f'display:flex;flex-direction:column;gap:15px;">{imgs}</body>'
-        )
-        pg.wait_for_timeout(500)
-        return pg.screenshot(full_page=True)
-    except Exception as e:
-        return None
-    finally:
-        pg.close()
+def debug_tg(page, msg: str, filename: str):
+    """专门用于向TG发送实时探针截图的函数"""
+    log_info(f"📸 正在抓取实时截图: {msg}")
+    buf = take_screenshot(page, filename)
+    if buf:
+        send_tg(f"📸 <b>调试截图</b> | 账号 {INSTANCE_ID}\n📍 节点: {msg}", buf)
 
 # =========================================================================
-# AFK 挂机防冻引擎注入 (完美适配 START EARNING 与 HOLD TO START)
+# AFK 挂机引擎
 # =========================================================================
 AFK_JS_PAYLOAD = r"""
 if (window.top === window.self) {
     window.addEventListener('load', function () {
         if (!window.location.href.includes('/earn') && !window.location.href.includes('/dashboard')) return;
-        console.log('[AFKv21] 注入成功，正在接管挂机逻辑');
 
         const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 6000 };
         const workerCode = `
@@ -238,13 +222,10 @@ if (window.top === window.self) {
             var msg = document.getElementById('adblocker-message'); if(msg) msg.style.display = 'none';
         }
 
-        // 🚀 核心突破：支持普通点击与长按解锁 (1200ms)
         function tryHoldClick(el) {
             if (Date.now() - lastClickTime < CFG.CLICK_DEBOUNCE) return;
             lastClickTime = Date.now(); 
             if(el.disabled) el.disabled = false;
-            
-            console.log('[AFKv21] 执行物理长按/点击:', el.innerText);
             
             const mousedown = new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window});
             const mouseup = new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window});
@@ -253,7 +234,7 @@ if (window.top === window.self) {
             setTimeout(() => {
                 el.dispatchEvent(mouseup);
                 el.click();
-            }, 1200); // 长按超过1秒，完美突破 HOLD TO START
+            }, 1200);
         }
 
         function findStartButton() {
@@ -306,81 +287,22 @@ if (window.top === window.self) {
 }
 """
 
-# =========================================================================
-# 第一部分：稳健登录 (源自 FreezeHost-main)
-# =========================================================================
-def check_site_down(page) -> bool:
-    try:
-        return page.evaluate("""() => {
-            const body = document.body ? document.body.innerText : '';
-            if (body.includes('CONNECTION TO THE MANAGEMENT SERVICES LOST')) return true;
-            if (body.includes('Retrying in') && body.includes('Retry Now')) return true;
-            if (document.querySelector('button:has-text("Retry Now")')) return true;
-            return false;
-        }""")
-    except Exception:
-        return False
-
-def wait_for_site_ready(page) -> bool:
-    for attempt in range(1, MAX_SITE_RETRIES + 1):
-        log_info(f"加载 FreezeHost 首页 (尝试 {attempt}/{MAX_SITE_RETRIES})...")
-        try:
-            page.goto(BASE_URL, wait_until="domcontentloaded", timeout=TIMEOUT)
-        except PlaywrightTimeout:
-            log_warn(f"首页加载超时 (尝试 {attempt})")
-            if attempt < MAX_SITE_RETRIES: page.wait_for_timeout(RETRY_WAIT)
-            continue
-
-        page.wait_for_timeout(3000)
-
-        if check_site_down(page):
-            log_warn(f"FreezeHost 后端服务不可用 (尝试 {attempt})")
-            try:
-                retry_btn = page.locator('button:has-text("Retry Now")')
-                if retry_btn.is_visible():
-                    log_info("点击页面 Retry Now 按钮...")
-                    retry_btn.click()
-                    page.wait_for_timeout(10000)
-                    if not check_site_down(page):
-                        log_info("站点恢复正常")
-                        return True
-            except Exception: pass
-            if attempt < MAX_SITE_RETRIES:
-                log_info(f"等待 {RETRY_WAIT // 1000} 秒后重试...")
-                page.wait_for_timeout(RETRY_WAIT)
-            continue
-
-        try:
-            if page.locator('span.text-lg:has-text("Login with Discord")').is_visible():
-                log_info("首页加载正常，登录按钮可见")
-                return True
-        except Exception: pass
-        log_info("首页已加载（未检测到宕机页面）")
-        return True
-    return False
-
 def handle_oauth_page(page):
     log_info("进入 OAuth 授权页处理...")
-    try:
-        page.wait_for_timeout(2000)
-    except: pass
+    page.wait_for_timeout(2000)
+    
+    # 📸 【战地记者】拍下 Discord 授权页，看看到底是不是卡在这里！
+    debug_tg(page, "Discord 授权页面", "discord_oauth")
     
     for _ in range(20):
         if "discord.com" not in page.url: return
-        try:
-            page.evaluate("""() => {
-                document.querySelectorAll('div').forEach(el => {
-                    if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
-                });
-                scrollTo(0, document.body.scrollHeight);
-            }""")
-        except Exception as e:
-            if "Execution context was destroyed" in str(e) or "Target" in str(e):
-                log_info("检测到页面正在自动跳转，中断 OAuth 滚动操作...")
-                return
-        try:
-            page.wait_for_timeout(800)
-        except: pass
+        page.evaluate("""() => {
+            document.querySelectorAll('div').forEach(el => {
+                if (el.scrollHeight > el.clientHeight) el.scrollTop = el.scrollHeight;
+            });
+            scrollTo(0, document.body.scrollHeight);
+        }""")
+        page.wait_for_timeout(800)
 
     for _ in range(10):
         if "discord.com" not in page.url: return
@@ -395,17 +317,11 @@ def handle_oauth_page(page):
                 page.wait_for_timeout(2000)
                 if "discord.com" not in page.url: return
                 break
-            except Exception as e:
-                if "Execution context was destroyed" in str(e) or "Target" in str(e):
-                    log_info("检测到页面正在自动跳转，中断 OAuth 点击操作...")
-                    return
-                continue
-        try:
-            page.wait_for_timeout(1500)
-        except: pass
+            except Exception: continue
+        page.wait_for_timeout(1500)
 
 # =========================================================================
-# 第二部分：发现服务器并续费 (包含完整新版弹窗处理)
+# 第二部分：发现服务器并续费
 # =========================================================================
 def discover_server_ids(page) -> list[str]:
     for attempt in range(3):
@@ -428,6 +344,11 @@ def discover_server_ids(page) -> list[str]:
             page.reload(wait_until="networkidle")
 
         page.wait_for_timeout(5000)
+        
+        # 📸 【战地记者】拍下 Dashboard，看看有没有加载出来服务器
+        if attempt == 0:
+            debug_tg(page, "Dashboard 服务器列表", "dashboard_list")
+            
         page.remove_listener("request", on_req)
 
         js_ids = page.evaluate(r"""() => {
@@ -466,6 +387,9 @@ def process_server(page, server_id: str) -> dict:
         page.goto(server_url, wait_until="networkidle")
         page.wait_for_timeout(3000)
 
+        # 📸 【战地记者】拍下续费前的控制台
+        debug_tg(page, f"服务器 {server_id} 续费表面板", f"renew_before_{server_id}")
+
         status_text = page.evaluate("""() => {
             const el = document.getElementById('renewal-status-console');
             return el ? el.innerText.trim() : null;
@@ -481,7 +405,6 @@ def process_server(page, server_id: str) -> dict:
             result.update(status="cooldown", emoji="⏳", status_label="冷却期", detail=remaining_before or f"{total_days:.1f}天")
             return result
 
-        # 🚀 1. 寻找面板主续期按钮
         log_info(f"[{server_id}] 寻找主面板续期入口...")
         try:
             renew_btn = page.locator("button:has-text('Renew'), button:has-text('Extend'), button:has-text('연장'), button.bkrtgq").first
@@ -495,20 +418,15 @@ def process_server(page, server_id: str) -> dict:
 
         page.wait_for_timeout(2000)
 
-        # 🚀 2. 寻找 RENEWAL SYSTEM 弹窗中的黄底按钮: RENEW INSTANCE
         try:
             confirm_inst_btn = page.locator("button:has-text('RENEW INSTANCE'), button:has-text('Renew Instance')").first
             if confirm_inst_btn.is_visible(timeout=5000):
                 confirm_inst_btn.click()
                 log_info(f"[{server_id}] 已确认 RENEW INSTANCE，触发安全验证...")
-            else:
-                log_warn(f"[{server_id}] 未发现 RENEW INSTANCE 二次确认弹窗，可能直接进入安全验证...")
         except: pass
 
         page.wait_for_timeout(2000)
 
-        # 🚀 3. 点碎 Security Verification 内的 Turnstile 盾牌
-        log_info(f"[{server_id}] 探测安全验证 (Turnstile)...")
         for _ in range(15):
             try:
                 iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
@@ -516,10 +434,8 @@ def process_server(page, server_id: str) -> dict:
                     cb = iframe.locator('input[type="checkbox"], .cb-lb')
                     if cb.is_visible(timeout=1000): 
                         cb.click()
-                        log_info(f"[{server_id}] 已点击 Turnstile 验证码框")
             except: pass
             
-            # 探测是否有钱不够的报错 Toast
             body_text = page.inner_text("body")
             if "Cannot Afford Renewal" in body_text:
                 log_warn(f"[{server_id}] 余额不足: Cannot Afford Renewal")
@@ -530,8 +446,6 @@ def process_server(page, server_id: str) -> dict:
 
         page.wait_for_timeout(4000)
 
-        # 🚀 4. 回到控制台强制刷新校验天数
-        log_info(f"[{server_id}] 验证流程结束，重新读取剩余天数校验结果...")
         page.goto(server_url, wait_until="networkidle")
         page.wait_for_timeout(3000)
         
@@ -542,7 +456,6 @@ def process_server(page, server_id: str) -> dict:
         result["after"] = parse_remaining(after_text)
         after_days = remaining_total_days(after_text)
         
-        # 严格判断: 天数真的增加了，才算成功！
         if after_days is not None and total_days is not None and after_days > (total_days + 1):
             log_info(f"[{server_id}] 校验通过！天数已增加。")
             result.update(status="renewed", emoji="✅", status_label="续期成功",
@@ -584,7 +497,6 @@ def run_pipeline():
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
-        # 抹除特征并注入 AFK 引擎
         context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
         context.add_init_script(AFK_JS_PAYLOAD)
         
@@ -594,21 +506,21 @@ def run_pipeline():
         try:
             # ── 1. 稳健登录 ──────────────────────
             log_info("打开 FreezeHost 登录页...")
-            if not wait_for_site_ready(page):
-                raise RuntimeError("站点宕机，无法连接")
+            try:
+                page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
+            except: pass
             
             try:
                 page.click('span.text-lg:has-text("Login with Discord")', timeout=15000)
                 page.evaluate("document.querySelector('button#confirm-login')?.click();")
-                log_info("已接受服务条款 (通过底层JS点击)")
-            except Exception as e:
-                log_info(f"点击条款时出现波动: {e}")
+                log_info("已接受服务条款")
+            except Exception: pass
 
             try:
                 page.wait_for_url(re.compile(r"discord\.com"), timeout=30000)
                 log_info("已到达 Discord, 开始注入 Token...")
             except PlaywrightTimeout:
-                log_warn("Discord 跳转迟缓，强制尝试注入...")
+                log_warn("Discord 跳转迟缓...")
 
             page.evaluate("""(token) => {
                 const f = document.createElement('iframe'); f.style.display = 'none'; document.body.appendChild(f);
@@ -621,6 +533,8 @@ def run_pipeline():
             page.wait_for_timeout(3000)
 
             if re.search(r"discord\.com/login", page.url):
+                # 📸 注入失败时截图
+                debug_tg(page, "Token 失效报错", "token_invalid")
                 raise RuntimeError("Token 已失效，请更换 Token！")
 
             log_info("Token 注入成功，处理 OAuth 跳转...")
@@ -631,10 +545,10 @@ def run_pipeline():
 
             log_info("等待浏览器回调完成...")
             try:
-                page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=45000)
+                page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=35000)
                 page.wait_for_load_state("networkidle", timeout=15000) 
             except PlaywrightTimeout:
-                log_warn("回调加载超时，如果已在主站范围，则放行。")
+                log_warn("回调超时！如果已在主站范围，将被放行。")
 
             log_info("✅ 登录成功！")
 
@@ -651,7 +565,6 @@ def run_pipeline():
                     buf = take_screenshot(page, f"server-{_SERVER_INDEX.get(sid, 0)}")
                     if buf: screenshots.append(buf)
 
-            # ── 合并截图与推送 ──────────────────────────
             final_img = (screenshots[0] if len(screenshots) == 1 else merge_screenshots(browser, screenshots) if screenshots else None)
             lines = []
             for r in results:
@@ -668,11 +581,12 @@ def run_pipeline():
             log_info("🚀 跳转 /earn 页面开启挂机印钞模式！")
             try:
                 page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
-            except Exception as e:
-                log_warn(f"跳转 /earn 遇到波动 ({e})，稍后将自动纠偏...")
+            except: pass
 
             page.wait_for_timeout(5000)
-            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 探测完成，正式开启挂机赚币模式！")
+            
+            # 🐾 修复提示词，改成你要的样子
+            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 登录并进入后台成功，正式开启挂机赚币模式！")
             
             global_start = time.time()
             max_runtime_sec = MAX_RUNTIME * 60
@@ -685,40 +599,40 @@ def run_pipeline():
                     iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
                     if iframe:
                         cb = iframe.locator('input[type="checkbox"], .cb-lb')
-                        if cb.is_visible(timeout=1000):
-                            cb.click()
-                            log_info("🛡️ 自动点碎 Turnstile 验证框")
+                        if cb.is_visible(timeout=1000): cb.click()
                 except: pass
                 
-                # 🚀 终极掉线防撞车纠偏 (剥离了导致挂掉的 else 分支)
                 curr_url = page.url
-                if "/earn" not in curr_url:
-                    log_info(f"⚠️ URL 发生偏移 (当前: {curr_url})")
+                
+                # 🚀 终极防卡死：如果在死循环回调页，拍个照然后等
+                if "submitlogin" in curr_url or "/callback" in curr_url:
+                    log_info(f"⏳ 浏览器在回调页 ({curr_url})")
+                    if loop_counter % 3 == 0: # 稍微等久一点再拍照，防止刷屏
+                        debug_tg(page, "异常：卡在回调页面", f"stuck_callback_{loop_counter}")
+                    try:
+                        page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=25000)
+                    except: pass
+                elif "discord.com" in curr_url:
+                    log_info("检测到退出，重新注入并授权...")
+                    debug_tg(page, "AFK 期间弹回 Discord", f"afk_discord_{loop_counter}")
                     
-                    # 如果掉线跳到了 Discord，自动重新授权
-                    if "discord.com" in curr_url:
-                        log_info("检测到 Discord 授权，尝试重新走授权流程...")
-                        handle_oauth_page(page)
-                        try: page.wait_for_url(re.compile(r"/submitlogin|/callback|/dashboard|/earn"), timeout=15000)
-                        except: pass
-                        curr_url = page.url
-
-                    # 如果停在回调处理页，给它最多 25 秒的缓冲时间
-                    if "submitlogin" in curr_url or "/callback" in curr_url or "login" in curr_url:
-                        log_info("系统正在处理登录回调，耐心等待跳转...")
-                        try:
-                            page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=25000)
-                        except:
-                            log_warn("后端回调响应超时！")
-
-                    # 无论上面经历了什么，只要最终还没到 /earn，强行拉回去！
-                    curr_url = page.url
-                    if "/earn" not in curr_url:
-                        log_info("强制拉回挂机战场 /earn...")
-                        try:
-                            page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
-                        except Exception as e:
-                            log_warn(f"强制跳转 /earn 遇到波动: {e}")
+                    if "login" in curr_url: # Token 掉了
+                        page.evaluate("""(token) => {
+                            const f = document.createElement('iframe'); f.style.display = 'none'; document.body.appendChild(f);
+                            f.contentWindow.localStorage.setItem('token', '"'+token+'"');
+                            try { localStorage.setItem('token', '"'+token+'"'); } catch(e) {}
+                            document.body.removeChild(f);
+                        }""", DISCORD_TOKEN)
+                        page.reload()
+                        page.wait_for_timeout(3000)
+                        
+                    handle_oauth_page(page)
+                    try: page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=20000)
+                    except: pass
+                elif "/earn" not in curr_url:
+                    log_info(f"⚠️ URL 偏移 (当前: {curr_url})，尝试拉回战场...")
+                    try: page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
+                    except: pass
                 
                 # 播报状态
                 if loop_counter % 6 == 0:
@@ -742,3 +656,4 @@ def run_pipeline():
 
 if __name__ == "__main__":
     run_pipeline()
+```eof
