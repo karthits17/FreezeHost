@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-FreezeHost 黄金双核流水线 (绝对隔离版)
+FreezeHost 黄金双核流水线 (绝对物理隔离版)
 第一阶段: 原汁原味 Playwright 登录+续费 (FreezeHost-main 逻辑)
 第二阶段: 原汁原味 SeleniumBase UC 挂机 (freeze-afk 逻辑)
 """
@@ -19,7 +19,7 @@ from urllib.request import Request, urlopen
 from pathlib import Path
 
 # =====================================================================
-# 全局环境变量共享映射
+# 全局环境变量映射
 # =====================================================================
 if "FREEZEHOST_DISCORD_TOKEN" in os.environ:
     os.environ["DISCORD_TOKEN"] = os.environ["FREEZEHOST_DISCORD_TOKEN"]
@@ -30,25 +30,25 @@ TG_CHAT_ID    = os.environ.get("TG_CHAT_ID", "").strip()
 INSTANCE_ID   = int(os.environ.get("ACCOUNT_INDEX", os.environ.get("INSTANCE_ID", "1")))
 MAX_RUNTIME   = int(os.environ.get("MAX_RUNTIME", "300"))
 
-BASE_URL   = "https://free.freezehost.pro"
-SCREENSHOT_DIR = Path("screenshots")
-SCREENSHOT_DIR.mkdir(exist_ok=True)
-
 
 # =====================================================================
-# 🚀 阶段一：Playwright 原版登录与续费 (源自 FreezeHost-main/renew.py)
+# 🚀 阶段一：纯血 Playwright 续费 (源自 FreezeHost-main/renew.py)
 # =====================================================================
 def run_renew_phase():
     print("\n" + "="*60)
-    print(f"🚀 [阶段一] 启动 Playwright 登录与续费探测 (账号 {INSTANCE_ID})")
+    print(f"🚀 [阶段一] 启动 Playwright 登录与续费 (账号 {INSTANCE_ID})")
     print("="*60)
     
     from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
 
-    TIMEOUT = 60_000
+    TIMEOUT        = 60_000
     MAX_SITE_RETRIES = 3
-    RETRY_WAIT = 30_000
-    VIEWPORT_W, VIEWPORT_H = 1280, 753
+    RETRY_WAIT     = 30_000
+    SCREENSHOT_DIR = Path("screenshots")
+    SCREENSHOT_DIR.mkdir(exist_ok=True)
+    BASE_URL   = "https://free.freezehost.pro"
+    VIEWPORT_W = 1280
+    VIEWPORT_H = 753
     
     _SENSITIVE_VALUES = set()
     _SERVER_INDEX = {}
@@ -74,8 +74,9 @@ def run_renew_phase():
         text = re.sub(r"connect\.sid=[^;\s]+", "connect.sid=***", text)
         return text
 
-    def log_info(msg: str):  print(f"[RENEW] [I{INSTANCE_ID}] [INFO] {_mask(msg)}", flush=True)
-    def log_warn(msg: str):  print(f"[RENEW] [I{INSTANCE_ID}] [WARN] {_mask(msg)}", flush=True)
+    def log_info(msg: str):  print(f"[RENEW] [INFO] {_mask(msg)}", flush=True)
+    def log_warn(msg: str):  print(f"[RENEW] [WARN] {_mask(msg)}", flush=True)
+    def log_error(msg: str): print(f"[RENEW] [ERROR] {_mask(msg)}", flush=True)
 
     def parse_remaining(text: str) -> str | None:
         if not text: return None
@@ -197,7 +198,7 @@ def run_renew_phase():
                     }
                     if (!scrolled) scrollTo(0, document.body.scrollHeight);
                 }""")
-            except: return
+            except: pass
             page.wait_for_timeout(800)
 
         for _ in range(10):
@@ -231,28 +232,31 @@ def run_renew_phase():
             page.wait_for_timeout(5000)
             try: page.remove_listener("request", on_req)
             except: pass
-            js_ids = page.evaluate(r"""() => {
-                const ids = [];
-                if (typeof serverData !== 'undefined' && Array.isArray(serverData)) serverData.forEach(s => { if (s.identifier) ids.push(s.identifier); });
-                if (!ids.length) document.querySelectorAll('script:not([src])').forEach(sc => {
-                    for (const m of sc.textContent.matchAll(/identifier:\s*["']([a-f0-9]{6,})["']/gi)) ids.push(m[1]);
-                });
-                return ids;
-            }""")
+            
+            try:
+                js_ids = page.evaluate(r"""() => {
+                    const ids = [];
+                    if (typeof serverData !== 'undefined' && Array.isArray(serverData)) serverData.forEach(s => { if (s.identifier) ids.push(s.identifier); });
+                    if (!ids.length) document.querySelectorAll('script:not([src])').forEach(sc => {
+                        for (const m of sc.textContent.matchAll(/identifier:\s*["']([a-f0-9]{6,})["']/gi)) ids.push(m[1]);
+                    });
+                    return ids;
+                }""")
+            except: js_ids = []
+            
             all_ids = set(js_ids or []) | captured
             for sid in sorted(all_ids): _register_sensitive(sid)
             if all_ids:
                 log_info(f"发现 {len(all_ids)} 台服务器")
                 return sorted(all_ids)
             log_warn(f"第 {attempt+1} 次未发现服务器")
-            take_screenshot(page, f"dashboard-empty-{attempt+1}")
             if attempt < 2: page.wait_for_timeout(3000)
         return []
 
     def process_server(page, server_id: str) -> dict:
         server_url = f"{BASE_URL}/server-console?id={server_id}"
         result = dict(server_id=server_id, status="unknown", before=None, after=None, emoji="❓", status_label="未知", detail="")
-        log_info(f"[{server_id}] 开始处理续期")
+        log_info(f"[{server_id}] 开始处理")
         try:
             page.goto(server_url, wait_until="networkidle")
             page.wait_for_timeout(3000)
@@ -308,16 +312,16 @@ def run_renew_phase():
                 log_info(f"[{server_id}] 续期成功！")
                 result.update(status="renewed", emoji="✅", status_label="续期成功", detail=f"{result['before'] or '?'} → {result['after'] or '?'}")
             else:
-                log_warn(f"[{server_id}] 续期失败！时间未实质增加。")
+                log_warn(f"[{server_id}] 续期失败！")
                 result.update(status="failed", emoji="❌", status_label="续期失败", detail=f"时间未实质增加 ({result['before'] or '?'})")
         except Exception as e:
             log_warn(f"[{server_id}] 异常: {e}")
             result.update(status="error", emoji="❌", status_label="脚本异常", detail=str(e)[:80])
         return result
 
-    # 🚀 纯血 Playwright 启动 (完全依照原版 renew.py 逻辑，100% headless=True)
+    # 🚀 严格还原 FreezeHost-main/renew.py 登录机制 (默认 headless=True)
     with sync_playwright() as pw:
-        log_info("启动浏览器 (纯血 Playwright Headless=True)")
+        log_info("启动浏览器 (Playwright Headless 原版模式)")
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
         page.set_default_timeout(TIMEOUT)
@@ -325,14 +329,13 @@ def run_renew_phase():
         try:
             log_info("打开 FreezeHost 登录页")
             if not wait_for_site_ready(page):
-                buf = take_screenshot(page, "site-down")
-                send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n🔌 站点宕机无法连接", buf)
+                log_error("站点宕机无法连接")
                 return
 
             try:
                 page.click('span.text-lg:has-text("Login with Discord")', timeout=15_000)
-                # 兼容暗改按钮
-                page.evaluate("document.querySelector('button#confirm-login')?.click();")
+                page.locator("button#confirm-login").wait_for(state="visible", timeout=5000)
+                page.locator("button#confirm-login").click()
                 log_info("已接受服务条款")
             except: pass
 
@@ -351,9 +354,7 @@ def run_renew_phase():
             page.wait_for_timeout(3000)
 
             if re.search(r"discord\.com/login", page.url):
-                buf = take_screenshot(page, "token-invalid")
-                send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n❌ Token 已失效！请重新获取！", buf)
-                raise RuntimeError("Token 登录失败")
+                raise RuntimeError("Token 登录失败/失效")
 
             log_info("Token 注入成功")
             try:
@@ -372,20 +373,16 @@ def run_renew_phase():
             log_info("✅ 登录成功！")
 
             server_ids = discover_server_ids(page)
-            results, screenshots = [], []
+            results = []
             if not server_ids:
                 log_info("❌ 未发现任何服务器。")
-                buf = take_screenshot(page, "no-servers")
-                send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n⚠️ 未发现任何服务器", buf)
+                send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n⚠️ 未发现任何服务器")
             else:
                 for sid in server_ids:
                     log_info("=" * 50)
                     res = process_server(page, sid)
                     results.append(res)
-                    buf = take_screenshot(page, f"server-{_SERVER_INDEX.get(sid, 0)}")
-                    if buf: screenshots.append(buf)
 
-                final_img = (screenshots[0] if len(screenshots) == 1 else merge_screenshots(browser, screenshots) if screenshots else None)
                 lines = []
                 for r in results:
                     s = f"服务器: {r['server_id']} | {r['emoji']}{r['status_label']}"
@@ -393,13 +390,12 @@ def run_renew_phase():
                     lines.append(s)
                 
                 if lines:
-                    send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines), final_img)
+                    send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n" + "\n".join(lines))
                 log_info("续费探测结束。")
 
         except Exception as e:
             log_error(f"异常: {e}")
-            buf = take_screenshot(page, "fatal-error")
-            send_tg(f"🤖 <b>FreezeHost 续费报告</b>\n👤 账号 {INSTANCE_ID}\n❌ 脚本崩溃异常: {e}", buf)
+            send_tg(f"🤖 <b>FreezeHost 续费报警</b>\n👤 账号 {INSTANCE_ID}\n❌ 第一阶段崩溃: {e}")
         finally:
             browser.close()
 
@@ -577,15 +573,13 @@ def run_afk_phase():
         log_afk("Session #%d done" % session_num)
         return True
 
-    # 🚀 纯血 SeleniumBase UC 启动 (完全依照原版 freeze_afk.py 逻辑)
+    # 🚀 纯血 SeleniumBase UC 启动
     sb_options = {
         "uc": True,
         "test": True,
         "headed": True, # 这是必须的，否则无法赚币
         "chromium_arg": "--no-sandbox,--disable-dev-shm-usage,--disable-gpu,--window-size=1280,720",
     }
-    
-    # ❌ 去除本地强行塞的 WARP_PROXY 配置，交给 Actions 全局接管！
 
     with SB(**sb_options) as sb:
         if not login_via_discord_token(sb, DISCORD_TOKEN):
@@ -593,7 +587,6 @@ def run_afk_phase():
             return
         log_afk("Login OK!")
 
-        # 启动赚币前的通知
         if TG_CHAT_ID and TG_BOT_TOKEN:
             try:
                 req = Request(f"https://api.telegram.org/bot{TG_BOT_TOKEN}/sendMessage", data=json.dumps({"chat_id": TG_CHAT_ID, "text": f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 登录成功，正式开启原版 SeleniumBase 赚币引擎！", "parse_mode": "HTML"}).encode(), headers={"Content-Type": "application/json"}, method="POST")
