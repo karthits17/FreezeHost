@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 FreezeHost AFK & Renew - 黄金流水线 (Playwright 单核全自动驱动)
-严格遵循: 登录 -> 发现服务器 -> 续费 -> AFK赚币
+严格遵循: 登录 -> 发现服务器 -> 续费(适配最新弹窗UI) -> AFK赚币(适配物理长按)
 """
 
 import os
@@ -166,15 +166,15 @@ def merge_screenshots(browser, buffers: list) -> bytes | None:
         pg.close()
 
 # =========================================================================
-# AFK 挂机防冻引擎注入 (支持 HOLD TO START)
+# AFK 挂机防冻引擎注入 (完美适配 START EARNING 与 HOLD TO START)
 # =========================================================================
 AFK_JS_PAYLOAD = r"""
 if (window.top === window.self) {
     window.addEventListener('load', function () {
-        if (!window.location.href.includes('/earn')) return;
-        console.log('[AFKv20] 注入成功，正在接管挂机逻辑');
+        if (!window.location.href.includes('/earn') && !window.location.href.includes('/dashboard')) return;
+        console.log('[AFKv21] 注入成功，正在接管挂机逻辑');
 
-        const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 5000 };
+        const CFG = { CHECK_INTERVAL: 1000, FORCE_REFRESH: 3600 * 1000, CLICK_DEBOUNCE: 6000 };
         const workerCode = `
             let iv = null;
             self.onmessage = function(e) {
@@ -238,10 +238,13 @@ if (window.top === window.self) {
             var msg = document.getElementById('adblocker-message'); if(msg) msg.style.display = 'none';
         }
 
+        // 🚀 核心突破：支持普通点击与长按解锁 (1200ms)
         function tryHoldClick(el) {
             if (Date.now() - lastClickTime < CFG.CLICK_DEBOUNCE) return;
             lastClickTime = Date.now(); 
-            el.disabled = false;
+            if(el.disabled) el.disabled = false;
+            
+            console.log('[AFKv21] 执行物理长按/点击:', el.innerText);
             
             const mousedown = new MouseEvent('mousedown', {bubbles: true, cancelable: true, view: window});
             const mouseup = new MouseEvent('mouseup', {bubbles: true, cancelable: true, view: window});
@@ -250,14 +253,18 @@ if (window.top === window.self) {
             setTimeout(() => {
                 el.dispatchEvent(mouseup);
                 el.click();
-            }, 800); 
+            }, 1200); // 长按超过1秒，完美突破 HOLD TO START
         }
 
         function findStartButton() {
-            const btns = Array.from(document.querySelectorAll('button'));
+            const btns = Array.from(document.querySelectorAll('button, a, div'));
             return btns.find(b => {
+                if (!b.innerText) return false;
                 const t = b.innerText.toUpperCase();
-                return t.includes('HOLD TO START') || t.includes('START NEW SESSION') || t.includes('START AFK');
+                return t.includes('START EARNING') || 
+                       t.includes('HOLD TO START') || 
+                       t.includes('START NEW SESSION') || 
+                       t.includes('START AFK');
             });
         }
 
@@ -382,7 +389,7 @@ def handle_oauth_page(page):
         page.wait_for_timeout(1500)
 
 # =========================================================================
-# 第二部分：发现服务器并续费 (源自 FreezeHost-main)
+# 第二部分：发现服务器并续费 (包含完整新版弹窗处理)
 # =========================================================================
 def discover_server_ids(page) -> list[str]:
     for attempt in range(3):
@@ -395,7 +402,6 @@ def discover_server_ids(page) -> list[str]:
         page.on("request", on_req)
         if attempt == 0:
             log_info("加载 Dashboard 发现服务器...")
-            # 🚀 坚决等待网络闲置，防止导航打断！
             try:
                 page.goto(f"{BASE_URL}/dashboard", wait_until="networkidle", timeout=30000)
             except Exception as e:
@@ -459,57 +465,76 @@ def process_server(page, server_id: str) -> dict:
             result.update(status="cooldown", emoji="⏳", status_label="冷却期", detail=remaining_before or f"{total_days:.1f}天")
             return result
 
-        # 🚀 适应新老 UI 的混合点击方案
-        renew_href = page.evaluate("""() => {
-            // 新版按钮直接点击
-            const btns = Array.from(document.querySelectorAll('button'));
-            const target = btns.find(b => b.innerText.includes('Extend') || b.innerText.includes('Renew') || b.innerText.includes('연장'));
-            if (target && !target.disabled) { target.click(); return {href:'clicked', text:'btn-clicked'}; }
-            const bkrtgq = document.querySelector('button.bkrtgq');
-            if (bkrtgq && !bkrtgq.disabled) { bkrtgq.click(); return {href:'clicked', text:'btn-clicked'}; }
-            
-            // 老版链接提取
-            const rl = document.getElementById('renew-link-modal');
-            if (rl) { const h = rl.getAttribute('href'); if (h && h !== '#') return {href:h, text:rl.innerText.trim()}; }
-            for (const a of document.querySelectorAll('a[href*="renew"]')) {
-                const h = a.getAttribute('href');
-                if (h && h.includes('renew') && h !== '#') return {href:h, text:a.innerText.trim()};
-            }
-            return null;
-        }""")
+        # 🚀 1. 寻找面板主续期按钮
+        log_info(f"[{server_id}] 寻找主面板续期入口...")
+        try:
+            renew_btn = page.locator("button:has-text('Renew'), button:has-text('Extend'), button:has-text('연장'), button.bkrtgq").first
+            if renew_btn.is_visible(timeout=5000):
+                renew_btn.click()
+                log_info(f"[{server_id}] 已点击面板续期，等待 RENEWAL SYSTEM 弹窗...")
+            else:
+                raise Exception("未找到面板续期按钮")
+        except Exception as e:
+            raise RuntimeError(f"面板续期按钮定位失败: {e}")
 
-        if not renew_href:
-            raise RuntimeError("未找到续期链接或按钮")
+        page.wait_for_timeout(2000)
 
-        # 尝试点碎 Turnstile 验证框
-        for _ in range(8):
+        # 🚀 2. 寻找 RENEWAL SYSTEM 弹窗中的黄底按钮: RENEW INSTANCE
+        try:
+            confirm_inst_btn = page.locator("button:has-text('RENEW INSTANCE'), button:has-text('Renew Instance')").first
+            if confirm_inst_btn.is_visible(timeout=5000):
+                confirm_inst_btn.click()
+                log_info(f"[{server_id}] 已确认 RENEW INSTANCE，触发安全验证...")
+            else:
+                log_warn(f"[{server_id}] 未发现 RENEW INSTANCE 二次确认弹窗，可能直接进入安全验证...")
+        except: pass
+
+        page.wait_for_timeout(2000)
+
+        # 🚀 3. 点碎 Security Verification 内的 Turnstile 盾牌
+        log_info(f"[{server_id}] 探测安全验证 (Turnstile)...")
+        for _ in range(15):
             try:
                 iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
                 if iframe:
                     cb = iframe.locator('input[type="checkbox"], .cb-lb')
-                    if cb.is_visible(timeout=1000): cb.click()
+                    if cb.is_visible(timeout=1000): 
+                        cb.click()
+                        log_info(f"[{server_id}] 已点击 Turnstile 验证码框")
             except: pass
+            
+            # 探测是否有钱不够的报错 Toast
+            body_text = page.inner_text("body")
+            if "Cannot Afford Renewal" in body_text:
+                log_warn(f"[{server_id}] 余额不足: Cannot Afford Renewal")
+                result.update(status="broke", emoji="⚠️", status_label="余额不足", detail="金币不够续期")
+                return result
+                
             page.wait_for_timeout(1000)
 
-        # 尝试点击完成后的弹窗按钮
-        page.evaluate("""() => {
-            document.querySelectorAll('button').forEach(b => {
-                if (b.innerText.includes('Next') || b.innerText.includes('닫기') || b.innerText.includes('Close') || b.innerText.includes('Confirm')) {
-                    b.click();
-                }
-            });
-        }""")
         page.wait_for_timeout(4000)
 
+        # 🚀 4. 回到控制台强制刷新校验天数
+        log_info(f"[{server_id}] 验证流程结束，重新读取剩余天数校验结果...")
         page.goto(server_url, wait_until="networkidle")
         page.wait_for_timeout(3000)
+        
         after_text = page.evaluate("""() => {
             const el = document.getElementById('renewal-status-console');
             return el ? el.innerText.trim() : null;
         }""")
         result["after"] = parse_remaining(after_text)
-        result.update(status="renewed", emoji="✅", status_label="操作完成",
-                      detail=f"{result['before'] or '?'} → {result['after'] or '?'}")
+        after_days = remaining_total_days(after_text)
+        
+        # 严格判断: 天数真的增加了，才算成功！
+        if after_days is not None and total_days is not None and after_days > (total_days + 1):
+            log_info(f"[{server_id}] 校验通过！天数已增加。")
+            result.update(status="renewed", emoji="✅", status_label="续期成功",
+                          detail=f"{result['before'] or '?'} → {result['after'] or '?'}")
+        else:
+            log_warn(f"[{server_id}] 校验失败！天数未增加。可能金币不足或接口异常。")
+            result.update(status="failed", emoji="❌", status_label="续期失败",
+                          detail=f"时间未实质增加 ({result['before'] or '?'})")
 
     except Exception as e:
         log_error(f"[{server_id}] 异常: {e}")
@@ -592,7 +617,6 @@ def run_pipeline():
             log_info("等待浏览器回调完成...")
             try:
                 page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=45000)
-                # 等待重定向风暴结束
                 page.wait_for_load_state("networkidle", timeout=15000) 
             except PlaywrightTimeout:
                 log_warn("回调超时！如果已在主站范围，将被放行。")
@@ -627,10 +651,9 @@ def run_pipeline():
             # ── 3. 进入挂机战场 ──────────────────────────────────
             log_info("🚀 跳转 /earn 页面开启挂机印钞模式！")
             try:
-                page.goto(f"{BASE_URL}/earn", wait_until="networkidle", timeout=30000)
+                page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
             except Exception as e:
-                log_warn(f"跳转 /earn 遇到波动 ({e})，重新加载...")
-                page.reload(wait_until="networkidle")
+                log_warn(f"跳转 /earn 遇到波动 ({e})，稍后将自动纠偏...")
 
             page.wait_for_timeout(5000)
             send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {INSTANCE_ID}\n✅ 续期完成，正式开启挂机赚币模式！")
@@ -651,9 +674,15 @@ def run_pipeline():
                             log_info("🛡️ 自动点碎 Turnstile 验证框")
                 except: pass
                 
-                # 防掉线纠偏：如果意外跳回到了 login，拉回来
-                if "login" in page.url or "/submitlogin" in page.url or "discord" in page.url:
-                    log_info(f"⚠️ URL 发生致命偏移 (当前: {page.url})，尝试强拉回战场...")
+                # 🚀 终极防撞车：避开浏览器自身的 OAuth 自动重定向周期
+                curr_url = page.url
+                if "submitlogin" in curr_url or "discord.com" in curr_url or "/callback" in curr_url:
+                    log_info(f"⏳ 浏览器正在执行自动跳转 (当前: {curr_url})，耐心等待...")
+                    try:
+                        page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=30000)
+                    except: pass
+                elif "/earn" not in curr_url:
+                    log_info(f"⚠️ URL 偏移 (当前: {curr_url})，尝试拉回战场...")
                     try:
                         page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
                     except: pass
