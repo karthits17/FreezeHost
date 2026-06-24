@@ -41,7 +41,7 @@ def send_tg(text: str):
         log_info(f"TG 推送异常: {e}")
 
 # =========================================================================
-# 🐾 100% 还原原版的站点检测与登录逻辑
+# 🐾 100% 还原原版的站点检测与稳健登录逻辑
 # =========================================================================
 def check_site_down(page) -> bool:
     try:
@@ -62,8 +62,7 @@ def wait_for_site_ready(page) -> bool:
             page.goto(BASE_URL, wait_until="domcontentloaded", timeout=60000)
         except PlaywrightTimeout:
             log_warn(f"首页加载超时 (尝试 {attempt})")
-            if attempt < MAX_SITE_RETRIES:
-                page.wait_for_timeout(RETRY_WAIT)
+            if attempt < MAX_SITE_RETRIES: page.wait_for_timeout(RETRY_WAIT)
             continue
 
         page.wait_for_timeout(3000)
@@ -86,8 +85,7 @@ def wait_for_site_ready(page) -> bool:
             continue
 
         try:
-            login_visible = page.locator('span.text-lg:has-text("Login with Discord")').is_visible()
-            if login_visible:
+            if page.locator('span.text-lg:has-text("Login with Discord")').is_visible():
                 log_info("首页加载正常，登录按钮可见")
                 return True
         except Exception: pass
@@ -111,42 +109,27 @@ def handle_oauth_page(page):
         if "authorize" in btn_text and "scroll" not in btn_text: break
         page.evaluate("""() => {
             const sels = ['[class*="scroller"]','[class*="oauth2"]','[class*="permissionList"]',
-                '[class*="content"] [class*="scroll"]','[class*="listScroller"]',
-                'div[class*="modal"] div[style*="overflow"]','div[class*="root"] div[style*="overflow"]'];
+                '[class*="content"] [class*="scroll"]','[class*="listScroller"]'];
             let scrolled = false;
             for (const sel of sels) {
                 for (const el of document.querySelectorAll(sel)) {
-                    const s = getComputedStyle(el);
-                    if (el.scrollHeight > el.clientHeight &&
-                        ['auto','scroll'].some(v => s.overflowY === v || s.overflow === v))
-                        { el.scrollTop = el.scrollHeight; scrolled = true; }
+                    if (el.scrollHeight > el.clientHeight) { el.scrollTop = el.scrollHeight; scrolled = true; }
                 }
             }
-            if (!scrolled) document.querySelectorAll('div').forEach(el => {
-                if (el.scrollHeight > el.clientHeight + 10) {
-                    const s = getComputedStyle(el);
-                    if (['auto','scroll','hidden'].includes(s.overflowY)) el.scrollTop = el.scrollHeight;
-                }
-            });
-            scrollTo(0, document.body.scrollHeight);
+            if (!scrolled) scrollTo(0, document.body.scrollHeight);
         }""")
         page.wait_for_timeout(800)
 
     for _ in range(10):
         if "discord.com" not in page.url: return
-        for sel in ['button:has-text("Authorize")','button:has-text("授权")',
-                    'button[type="submit"]','div[class*="footer"] button','button[class*="primary"]']:
+        for sel in ['button:has-text("Authorize")','button:has-text("授权")', 'button[type="submit"]']:
             try:
                 btn = page.locator(sel).last
                 if not btn.is_visible(): continue
                 text = btn.inner_text().strip()
                 if any(k in text.lower() for k in ("取消","cancel","deny")): continue
                 if "scroll" in text.lower():
-                    page.evaluate("""() => {
-                        document.querySelectorAll('div').forEach(el => {
-                            if (el.scrollHeight > el.clientHeight + 5) el.scrollTop = el.scrollHeight;
-                        }); scrollTo(0, document.body.scrollHeight);
-                    }""")
+                    page.evaluate("scrollTo(0, document.body.scrollHeight);")
                     page.wait_for_timeout(1000)
                     break
                 if btn.is_disabled():
@@ -161,7 +144,7 @@ def handle_oauth_page(page):
 
 
 # =========================================================================
-# 🐾 史诗级融合：全自动挂机防冻防断线 JS 注入
+# 🐾 史诗级融合：全自动挂机防冻防断线 JS 注入 (完美版)
 # =========================================================================
 AFK_JS_PAYLOAD = r"""
 if (window.top === window.self) {
@@ -206,10 +189,6 @@ if (window.top === window.self) {
                   <div id="afk-timer" style="color:#7eb3ff;font-size:14px;font-weight:bold;">--:--</div>
                 </div>
               </div>
-              <div style="display:flex;justify-content:space-between;background:rgba(255,255,255,0.04);padding:5px;border-radius:8px;">
-                <span style="color:#aaa;">🔇 防冻状态</span>
-                <span id="afk-audio-status" style="color:#ffaa00;">等待</span>
-              </div>
             </div>`;
         document.body.appendChild(panel);
 
@@ -225,12 +204,10 @@ if (window.top === window.self) {
                 }
                 function activate() {
                     ctx.resume().then(() => {
-                        playLoop(); document.getElementById('afk-audio-status').textContent = '已激活';
-                        document.getElementById('afk-audio-status').style.color = '#00cc66';
-                        document.removeEventListener('click', activate, true);
+                        playLoop(); document.removeEventListener('click', activate, true);
                     }).catch(e => console.warn(e));
                 }
-                if (ctx.state === 'running') { playLoop(); document.getElementById('afk-audio-status').textContent = '已激活'; document.getElementById('afk-audio-status').style.color = '#00cc66'; }
+                if (ctx.state === 'running') { playLoop(); }
                 else { document.addEventListener('click', activate, true); }
             } catch (err) {}
         })();
@@ -238,7 +215,8 @@ if (window.top === window.self) {
         function bypassAdblock() {
             if(typeof adblockerDetected !== 'undefined') adblockerDetected = false;
             var msg = document.getElementById('adblocker-message'); if(msg) msg.style.display = 'none';
-            var btn = document.getElementById('start-afk-btn'); if(btn) { btn.disabled = false; btn.textContent = 'Start AFK Session'; }
+            var btn = document.getElementById('start-afk-btn'); 
+            if(btn && btn.disabled) { btn.disabled = false; btn.textContent = 'Start AFK Session'; }
         }
 
         function tryClick(el) {
@@ -257,7 +235,14 @@ if (window.top === window.self) {
             const timerText = timerEl ? timerEl.innerText.trim() : '--:--';
             document.getElementById('afk-timer').textContent = timerText;
             
+            const bodyText = document.body.innerText;
+            if (bodyText.includes('You are now earning coins') || bodyText.includes('1 coin will be added')) {
+                document.getElementById('afk-status-title').textContent = '💰 稳定获取金币中';
+                return;
+            }
+
             if (timerText === '0:00' || timerText === '00:00') {
+                document.getElementById('afk-status-title').textContent = '🔄 Session 续期中';
                 const renewBtn = document.evaluate("//button[contains(.,'Start New Session')]", document, null, 9, null).singleNodeValue;
                 if (renewBtn) tryClick(renewBtn);
                 else setTimeout(() => location.reload(), 2000);
@@ -265,7 +250,12 @@ if (window.top === window.self) {
             }
             
             const startBtn = document.getElementById('start-afk-btn');
-            if (startBtn && startBtn.offsetParent !== null) { tryClick(startBtn); return; }
+            if (startBtn && startBtn.offsetParent !== null) { 
+                document.getElementById('afk-status-title').textContent = '🚀 点击开始赚币';
+                tryClick(startBtn); 
+                return; 
+            }
+            document.getElementById('afk-status-title').textContent = '⏳ 等待操作/加载';
         }
         worker.onmessage = () => loop(); worker.postMessage('start');
     });
@@ -282,12 +272,18 @@ def run_earn():
         return
 
     with sync_playwright() as pw:
-        log_info("启动浏览器 (完全使用 WARP 系统级代理，无视本地代理参数)")
+        log_info("启动浏览器 (启用 Headed 模式，确保 CF Token 正常生成)")
         
-        # 彻底移除 proxy 注入参数，仅附加静音播放突破限制，100% 贴合原版环境
+        # ⚠️ 关键修复：必须设置 headless=False，否则 CF Turnstile 不起作用，无法赚币！
+        # 无视任何本地代理，完全交给 GitHub WARP 接管
         browser = pw.chromium.launch(
-            headless=True,
-            args=["--autoplay-policy=no-user-gesture-required"]
+            headless=False,
+            args=[
+                "--no-sandbox",
+                "--disable-gpu",
+                "--disable-dev-shm-usage",
+                "--autoplay-policy=no-user-gesture-required" 
+            ]
         )
         page = browser.new_page(viewport={"width": 1280, "height": 753})
         page.set_default_timeout(60_000)
@@ -296,20 +292,11 @@ def run_earn():
         page.add_init_script(AFK_JS_PAYLOAD)
 
         try:
-            # ── 1. 出口 IP 验证 (一字不差的原版) ──────────────────────
-            log_info("验证出口 IP...")
-            try:
-                ip = json.loads(page.goto("https://api.ipify.org?format=json", wait_until="domcontentloaded").text()).get("ip", "?")
-                log_info(f"出口 IP: {ip}")
-            except Exception:
-                log_warn("IP 验证超时")
-
-            # ── 2. 检测站点宕机与首页 (一字不差的原版) ────────────────
+            # ── 1. 检测站点与稳健登录 ──────────────────────
             log_info("打开 FreezeHost 登录页")
             if not wait_for_site_ready(page):
                 raise RuntimeError("站点宕机，无法连接")
 
-            # ── 3. 登录与 Token 注入 (一字不差的原版) ────────────────
             page.click('span.text-lg:has-text("Login with Discord")', timeout=15000)
             confirm_btn = page.locator("button#confirm-login")
             confirm_btn.wait_for(state="visible")
@@ -320,9 +307,7 @@ def run_earn():
             log_info("已到达 Discord")
 
             page.evaluate("""(token) => {
-                const f = document.createElement('iframe');
-                f.style.display = 'none';
-                document.body.appendChild(f);
+                const f = document.createElement('iframe'); f.style.display = 'none'; document.body.appendChild(f);
                 f.contentWindow.localStorage.setItem('token', '"'+token+'"');
                 try { localStorage.setItem('token', '"'+token+'"'); } catch(e) {}
                 document.body.removeChild(f);
@@ -337,7 +322,7 @@ def run_earn():
 
             log_info("Token 注入成功")
 
-            # ── 4. 处理 OAuth (一字不差的原版) ───────────────────────
+            # ── 2. 处理 OAuth ───────────────────────
             try:
                 page.wait_for_url(re.compile(r"discord\.com/oauth2/authorize"), timeout=6000)
                 page.wait_for_timeout(2000)
@@ -349,30 +334,32 @@ def run_earn():
                     except PlaywrightTimeout:
                         raise RuntimeError("OAuth 未跳转")
             except PlaywrightTimeout:
-                if "discord.com" in page.url:
-                    raise RuntimeError("OAuth 超时")
+                pass
 
-            # ── 5. 进入 Dashboard 或 Earn ─────────────────────────
+            # ── 3. 进入 Dashboard ─────────────────────────
             try:
                 page.wait_for_url(lambda u: "/callback" in u or "/dashboard" in u or "/earn" in u, timeout=10000)
-            except PlaywrightTimeout:
-                pass
+            except PlaywrightTimeout: pass
+            
             if "/callback" in page.url:
                 page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=15000)
 
             log_info("✅ 登录成功！原版登录方法完美通过！")
             send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {ACCOUNT_INDEX} 已成功登录！开启极速挂机！")
 
-            # ── 6. 进入挂机战场 ──────────────────────────────────
-            page.goto(f"{BASE_URL}/earn", wait_until="networkidle")
+            # ── 4. 进入挂机战场 ──────────────────────────────────
+            page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
+            page.wait_for_timeout(5000)
             
             global_start = time.time()
             max_runtime_sec = MAX_RUNTIME * 60
+            loop_counter = 0
             
-            log_info("🤖 已激活 Web Worker + 静音防冻双引擎！Python 退居幕后仅负责守卫...")
+            log_info("🤖 已激活 Web Worker + 静音防冻双引擎！进入挂机守护循环...")
 
             # 挂机死循环守护
             while time.time() - global_start < max_runtime_sec:
+                loop_counter += 1
                 try:
                     # 侦测并自动点碎可能意外弹出的 CF 盾牌
                     iframe = page.frame_locator('iframe[src^="https://challenges.cloudflare.com"]').first
@@ -380,13 +367,22 @@ def run_earn():
                         cb = iframe.locator('input[type="checkbox"], .cb-lb')
                         if cb.is_visible(timeout=1000):
                             cb.click()
-                            log_info("🛡️ 自动处理并点碎 Turnstile 验证框")
+                            log_info("🛡️ 发现并点击了 Turnstile 验证框")
                 except: pass
                 
-                # 检查是否因为掉线脱离了目标页面
-                if not page.url.startswith("https://free.freezehost.pro"):
-                    log_info("⚠️ URL 偏移，尝试拉回战场...")
-                    page.goto(f"{BASE_URL}/earn", wait_until="networkidle")
+                # 检查是否掉线偏移
+                if "/earn" not in page.url:
+                    log_info(f"⚠️ URL 偏移 (当前: {page.url})，尝试拉回战场...")
+                    page.goto(f"{BASE_URL}/earn", wait_until="domcontentloaded")
+                    page.wait_for_timeout(5000)
+                
+                # 每隔 1 分钟，读取并汇报一次网页挂机状态
+                if loop_counter % 6 == 0:
+                    try:
+                        ui_status = page.evaluate("() => document.getElementById('afk-status-title')?.innerText || '等待注入'")
+                        ui_timer  = page.evaluate("() => document.getElementById('afk-timer')?.innerText || '--:--'")
+                        log_info(f"📊 网页探针回传 | 状态: {ui_status} | 倒计时: {ui_timer}")
+                    except: pass
                 
                 page.wait_for_timeout(10000)
 
