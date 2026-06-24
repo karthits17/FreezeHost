@@ -185,6 +185,16 @@ def run_renew_phase():
     def handle_oauth_page(page):
         log_info("进入 OAuth 授权页处理")
         page.wait_for_timeout(2000)
+        
+        try:
+            if "rate limited" in page.content().lower():
+                buf = take_screenshot(page, "discord-rate-limit")
+                send_tg(f"🤖 <b>FreezeHost 续费报警</b>\n👤 账号 {INSTANCE_ID}\n❌ 触发 Discord API 频率限制 (Rate Limited)！请等待至少 30 分钟后再试！", buf)
+                raise RuntimeError("Discord 授权被频率限制 (Rate Limited)")
+        except Exception as e:
+            if "Rate Limited" in str(e): raise e
+            pass
+            
         for _ in range(20):
             if "discord.com" not in page.url: return
             try:
@@ -198,7 +208,7 @@ def run_renew_phase():
                     }
                     if (!scrolled) scrollTo(0, document.body.scrollHeight);
                 }""")
-            except: pass
+            except: return
             page.wait_for_timeout(800)
 
         for _ in range(10):
@@ -256,7 +266,7 @@ def run_renew_phase():
     def process_server(page, server_id: str) -> dict:
         server_url = f"{BASE_URL}/server-console?id={server_id}"
         result = dict(server_id=server_id, status="unknown", before=None, after=None, emoji="❓", status_label="未知", detail="")
-        log_info(f"[{server_id}] 开始处理")
+        log_info(f"[{server_id}] 开始处理续期")
         try:
             page.goto(server_url, wait_until="networkidle")
             page.wait_for_timeout(3000)
@@ -269,7 +279,6 @@ def run_renew_phase():
                 result.update(status="cooldown", emoji="⏳", status_label="冷却期", detail=result["before"])
                 return result
 
-            # 🛠️ 唯一修改点：适配新版弹窗点击逻辑
             try:
                 renew_btn = page.locator("button:has-text('Renew'), button:has-text('Extend'), button:has-text('연장'), button.bkrtgq").first
                 if renew_btn.is_visible(timeout=5000): renew_btn.click()
@@ -301,7 +310,6 @@ def run_renew_phase():
             }); }""")
             page.wait_for_timeout(2000)
 
-            # 校验天数是否真的增加
             page.goto(server_url, wait_until="networkidle")
             page.wait_for_timeout(3000)
             after_text = page.evaluate("() => { const el = document.getElementById('renewal-status-console'); return el ? el.innerText.trim() : null; }")
@@ -319,9 +327,11 @@ def run_renew_phase():
             result.update(status="error", emoji="❌", status_label="脚本异常", detail=str(e)[:80])
         return result
 
-    # 🚀 严格还原 FreezeHost-main/renew.py 登录机制 (默认 headless=True)
+    # =================================================================
+    # Playwright 登录主流程
+    # =================================================================
     with sync_playwright() as pw:
-        log_info("启动浏览器 (Playwright Headless 原版模式)")
+        log_info("启动浏览器 (纯血 Playwright Headless=True)")
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": VIEWPORT_W, "height": VIEWPORT_H})
         page.set_default_timeout(TIMEOUT)
@@ -370,6 +380,16 @@ def run_renew_phase():
                 try: page.wait_for_url(re.compile(r"/dashboard|/earn"), timeout=15000)
                 except: pass
 
+            # 防护：Discord API 频率限制拦截
+            try:
+                if "rate limited" in page.content().lower():
+                    buf = take_screenshot(page, "discord-rate-limit-final")
+                    send_tg(f"🤖 <b>FreezeHost 续费报警</b>\n👤 账号 {INSTANCE_ID}\n❌ 触发 Discord API 频率限制 (Rate Limited)！请等待至少 30 分钟后再试！", buf)
+                    raise RuntimeError("Discord 授权被频率限制 (Rate Limited)")
+            except Exception as e:
+                if "Rate Limited" in str(e): raise e
+                pass
+
             log_info("✅ 登录成功！")
 
             server_ids = discover_server_ids(page)
@@ -396,6 +416,7 @@ def run_renew_phase():
         except Exception as e:
             log_error(f"异常: {e}")
             send_tg(f"🤖 <b>FreezeHost 续费报警</b>\n👤 账号 {INSTANCE_ID}\n❌ 第一阶段崩溃: {e}")
+            raise e
         finally:
             browser.close()
 
@@ -416,7 +437,7 @@ def run_afk_phase():
 
     from seleniumbase import SB
 
-    SESSION_DURATION = 1200  # 原版写死的 20 分钟循环
+    SESSION_DURATION = 1200
     global_start = time.time()
 
     def log_afk(msg):
@@ -501,7 +522,6 @@ def run_afk_phase():
             """)
         except: pass
 
-        # 🛠️ 唯一修改点：兼容长按验证
         try:
             sb.execute_script("""
                 var btns = Array.from(document.querySelectorAll('button, a, div'));
@@ -573,11 +593,10 @@ def run_afk_phase():
         log_afk("Session #%d done" % session_num)
         return True
 
-    # 🚀 纯血 SeleniumBase UC 启动
     sb_options = {
         "uc": True,
         "test": True,
-        "headed": True, # 这是必须的，否则无法赚币
+        "headed": True, 
         "chromium_arg": "--no-sandbox,--disable-dev-shm-usage,--disable-gpu,--window-size=1280,720",
     }
 
