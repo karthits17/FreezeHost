@@ -188,7 +188,6 @@ def run_earn():
         return
 
     with sync_playwright() as pw:
-        # 使用原版的极速 Headless 模式
         browser = pw.chromium.launch(headless=True)
         page = browser.new_page(viewport={"width": 1280, "height": 720})
         page.set_default_timeout(60000)
@@ -244,7 +243,7 @@ def run_earn():
                     except: break
 
             log_info(f"挂机任务全部结束。共完成 {session_count} 轮。")
-            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {ACCOUNT_INDEX} 挂机结束\n⏱️ 共计运行 {MAX_RUNTIME} 分钟，约收益 {MAX_RUNTIME} 币！")
+            send_tg(f"🤖 <b>FreezeHost AFK</b>\n👤 账号 {ACCOUNT_INDEX} 挂机结束\n⏱️ 共计运行 {MAX_RUNTIME} 分钟！")
 
         except Exception as e:
             log_info(f"挂机异常崩溃: {e}")
@@ -253,4 +252,5 @@ def run_earn():
             browser.close()
 
 if __name__ == "__main__":
-    run()
+    # 🐾 修复点：正确调用 run_earn() 函数！
+    run_earn()
